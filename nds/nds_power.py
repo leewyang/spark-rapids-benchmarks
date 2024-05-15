@@ -33,12 +33,15 @@
 import argparse
 import csv
 import os
+import random
+import re
 import sys
 import time
 from collections import OrderedDict
-from pyspark.sql import SparkSession
 from PysparkBenchReport import PysparkBenchReport
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import udf
+from pyspark.sql.types import IntegerType
 
 from check import check_json_summary_folder, check_query_subset_exists, check_version
 from nds_gen_query_stream import split_special_query
@@ -75,6 +78,34 @@ def gen_sql_from_stream(query_stream_file_path):
     for q_name, q_content in extended_queries.items():
         extended_queries[q_name] = '-- start' + q_content
     return extended_queries
+
+def inject_udfs(query_dict, *, probability=0.1, seed=42):
+    """Randomly injects UDFs into queries."""
+    print(f"Injecting UDFs: probability={probability}, seed={seed}")
+    random.seed(seed)
+    for query_name, query in query_dict.items():
+        lines = query.split("\n")
+        for i, line in enumerate(lines):
+            lower_line = line.lower()
+            if "select" in lower_line:
+                if any([x in lower_line for x in ["rank", "case", "over", "from", "*", "count(*)"]]):
+                    # skip tricky select lines
+                    continue
+                elif re.search(r"select\w*$", lower_line):
+                    # skip select lines w/o columns
+                    continue
+                else:
+                    if random.random() < probability:
+                        # randomly inject UDF
+                        sleep = random.randint(1,5)
+                        if line.endswith(","):
+                            lines[i] = f"{line} sleep_udf({sleep}) as sleepy_time,"
+                        else:
+                            lines[i] = f"{line}, sleep_udf({sleep}) as sleepy_time"
+        query_dict[query_name] = "\n".join(lines)
+        print(query_dict[query_name])
+
+    return query_dict
 
 def setup_tables(spark_session, input_prefix, input_format, use_decimal, execution_time_list):
     """set up data tables in Spark before running the Power Run queries.
@@ -252,6 +283,16 @@ def run_query_stream(input_prefix,
         query_dict = get_query_subset(query_dict, sub_queries)
     # Run query
     power_start = int(time.time())
+
+    @udf(returnType=IntegerType())
+    def sleep_udf(x):
+        z = 0
+        for i in range(x * 100):
+            z = z + i
+        return z
+
+    spark_session.udf.register("sleep_udf", sleep_udf)
+
     for query_name, q_content in query_dict.items():
         # show query name in Spark web UI
         spark_session.sparkContext.setJobGroup(query_name, query_name)
@@ -391,8 +432,19 @@ if __name__ == "__main__":
     parser.add_argument('--allow_failure',
                         action='store_true',
                         help='Do not exit with non zero when any query failed or any task failed')
+    parser.add_argument('--inject_probability',
+                        type=float,
+                        help='probability of randomly injecting UDFs into queries.')
+    parser.add_argument('--inject_seed',
+                        type=int,
+                        default=42,
+                        help='random seed for injecting UDFs.')
     args = parser.parse_args()
     query_dict = gen_sql_from_stream(args.query_stream_file)
+    if args.inject_probability is not None:
+        query_dict = inject_udfs(query_dict, probability=args.inject_probability, seed=args.inject_seed)
+        sys.exit()
+
     run_query_stream(args.input_prefix,
                      args.property_file,
                      query_dict,

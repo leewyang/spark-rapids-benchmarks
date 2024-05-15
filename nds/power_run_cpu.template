@@ -18,6 +18,7 @@
 source base.template
 export SHUFFLE_PARTITIONS=${SHUFFLE_PARTITIONS:-200}
 
+#                   "--conf" "spark.sql.codegen.wholeStage=False"
 export SPARK_CONF=("--master" "${SPARK_MASTER}"
                    "--deploy-mode" "client"
                    "--conf" "spark.driver.memory=${DRIVER_MEMORY}"
